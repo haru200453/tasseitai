@@ -35,8 +35,7 @@ export default function SettingsPage() {
   };
 
   const handleLogout = async () => {
-    alert('ログアウトしました');
-    await signOut({ callbackUrl: '/login' }); 
+    await signOut({ callbackUrl: '/login?logout=true' });
   };
 
   if (!isMounted) {

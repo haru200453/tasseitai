@@ -80,3 +80,11 @@ body {
   font-weight: bold;
   cursor: pointer;
 }
+
+.logoutLink {
+  display: block;
+  margin-bottom: 16px;
+  color: #64748b;
+  font-size: 14px;
+  text-decoration: underline;
+}
