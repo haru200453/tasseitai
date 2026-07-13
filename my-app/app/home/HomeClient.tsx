@@ -59,15 +59,15 @@ const CATEGORY_NAMES: { [key: string]: string } = {
 type NotificationGateStatus = 'checking' | 'blocked' | 'passed';
 
 type HomeClientProps = {
-  scheduleDatabaseId: string;
-  todoDatabaseId: string;
+  scheduleDatabaseIds: string[];
+  todoDatabaseIds: string[];
   scheduleUnresolved: boolean;
   todoUnresolved: boolean;
 };
 
 export default function HomeClient({
-  scheduleDatabaseId,
-  todoDatabaseId,
+  scheduleDatabaseIds,
+  todoDatabaseIds,
   scheduleUnresolved,
   todoUnresolved,
 }: HomeClientProps) {
@@ -283,158 +283,184 @@ export default function HomeClient({
         )
       );
 
-      if (scheduleUnresolved) {
+      const scheduleDbIds = Array.isArray(scheduleDatabaseIds) ? scheduleDatabaseIds.filter(Boolean) : [];
+
+      if (scheduleUnresolved || scheduleDbIds.length === 0) {
         setScheduleError('Notionで「スケジュール」という名前のデータベースを連携すると、ここに表示されます');
         setScheduleLoading(false);
       } else {
-      fetch('/api/notion', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          databaseId: scheduleDatabaseId,
-          searchType: 'database',
-          pageSize: 50,
-        }),
-      })
-        .then((res) => {
+        const fetchDatabaseResults = async (databaseId: string) => {
+          const res = await fetch('/api/notion', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              databaseId,
+              searchType: 'database',
+              pageSize: 50,
+            }),
+          });
+
           if (res.status === 401) {
             router.push('/login');
             throw new Error('NOTION_UNAUTHORIZED');
           }
           if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-          return res.json();
-        })
-        .then((data) => {
-          const rawResults = Array.isArray(data.results) ? data.results : [];
 
-          const parseNotionDate = (value: string) => {
-            // 日付のみ（例: "2026-07-09"）はUTC 0時として解釈されてしまうため、
-            // ローカル日付として明示的に組み立てる
-            const dateOnlyMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-            if (dateOnlyMatch) {
-              const [, y, m, d] = dateOnlyMatch;
-              return { date: new Date(Number(y), Number(m) - 1, Number(d)), isDateOnly: true };
-            }
-            return { date: new Date(value), isDateOnly: false };
-          };
+          const data = await res.json();
+          return Array.isArray(data.results) ? data.results : [];
+        };
 
-          const events = rawResults
-            .map((item: any) => {
-              // プロパティ名が「日時」でない場合に備え、date型（{start, end}を持つ値）を持つプロパティを探す
-              const dateProp =
-                item.properties?.['日時'] ??
-                Object.values(item.properties ?? {}).find(
-                  (value: any) => value && typeof value === 'object' && typeof value.start === 'string'
-                );
-              if (!dateProp || !dateProp.start) return null;
-              const { date: start, isDateOnly } = parseNotionDate(dateProp.start);
-              const end = dateProp.end
-                ? parseNotionDate(dateProp.end).date
-                : isDateOnly
-                ? new Date(start.getFullYear(), start.getMonth(), start.getDate(), 23, 59, 59)
-                : new Date(start.getTime() + 60 * 60 * 1000);
-              const label = item.properties?.['予定'] || item.title || '無題';
-              return { id: item.id, label, start, end };
-            })
-            .filter((event: any) => event && event.end > scheduleWindowStart && event.start < scheduleWindowEnd)
-            .sort((a: any, b: any) => a.start.getTime() - b.start.getTime())
-            .map((event: any) => {
-              const clampedStart = event.start < scheduleWindowStart ? scheduleWindowStart : event.start;
-              const clampedEnd = event.end > scheduleWindowEnd ? scheduleWindowEnd : event.end;
-              const leftPercent = ((clampedStart.getTime() - scheduleWindowStart.getTime()) / scheduleWindowMs) * 100;
-              const widthPercent = Math.max(
-                ((clampedEnd.getTime() - clampedStart.getTime()) / scheduleWindowMs) * 100,
-                12
-              );
-              return {
-                id: event.id,
-                label: `${formatHHMM(event.start)} - ${event.label}`,
-                leftPercent,
-                widthPercent,
-              };
+        Promise.allSettled(scheduleDbIds.map(fetchDatabaseResults))
+          .then((results) => {
+            const rawResults = results.flatMap((result, index) => {
+              if (result.status === 'fulfilled') return result.value;
+              if (result.reason?.message === 'NOTION_UNAUTHORIZED') return [];
+              console.error(`NotionスケジュールDBの取得に失敗: ${scheduleDbIds[index]}`, result.reason);
+              return [];
             });
 
-          setScheduleEvents(events);
+            const parseNotionDate = (value: string) => {
+              // 日付のみ（例: "2026-07-09"）はUTC 0時として解釈されてしまうため、
+              // ローカル日付として明示的に組み立てる
+              const dateOnlyMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+              if (dateOnlyMatch) {
+                const [, y, m, d] = dateOnlyMatch;
+                return { date: new Date(Number(y), Number(m) - 1, Number(d)), isDateOnly: true };
+              }
+              return { date: new Date(value), isDateOnly: false };
+            };
 
-          const now = new Date();
-          const currentTimePercent = ((now.getTime() - scheduleWindowStart.getTime()) / scheduleWindowMs) * 100;
-          const isCurrentTimeInRange = now >= scheduleWindowStart && now <= scheduleWindowEnd;
+            const events = rawResults
+              .map((item: any) => {
+                // プロパティ名が「日時」でない場合に備え、date型（{start, end}を持つ値）を持つプロパティを探す
+                const dateProp =
+                  item.properties?.['日時'] ??
+                  Object.values(item.properties ?? {}).find(
+                    (value: any) => value && typeof value === 'object' && typeof value.start === 'string'
+                  );
+                if (!dateProp || !dateProp.start) return null;
+                const { date: start, isDateOnly } = parseNotionDate(dateProp.start);
+                const end = dateProp.end
+                  ? parseNotionDate(dateProp.end).date
+                  : isDateOnly
+                  ? new Date(start.getFullYear(), start.getMonth(), start.getDate(), 23, 59, 59)
+                  : new Date(start.getTime() + 60 * 60 * 1000);
+                const label = item.properties?.['予定'] || item.title || '無題';
+                return { id: item.id, label, start, end };
+              })
+              .filter((event: any) => event && event.end > scheduleWindowStart && event.start < scheduleWindowEnd)
+              .sort((a: any, b: any) => a.start.getTime() - b.start.getTime())
+              .map((event: any) => {
+                const clampedStart = event.start < scheduleWindowStart ? scheduleWindowStart : event.start;
+                const clampedEnd = event.end > scheduleWindowEnd ? scheduleWindowEnd : event.end;
+                const leftPercent = ((clampedStart.getTime() - scheduleWindowStart.getTime()) / scheduleWindowMs) * 100;
+                const widthPercent = Math.max(
+                  ((clampedEnd.getTime() - clampedStart.getTime()) / scheduleWindowMs) * 100,
+                  12
+                );
+                return {
+                  id: event.id,
+                  label: `${formatHHMM(event.start)} - ${event.label}`,
+                  leftPercent,
+                  widthPercent,
+                };
+              });
 
-          if (isCurrentTimeInRange && currentTimePercent >= 0 && currentTimePercent <= 100) {
-            setCurrentTimePercent(currentTimePercent);
-          } else {
-            setCurrentTimePercent(null);
-          }
+            setScheduleEvents(events);
 
-          setScheduleLoading(false);
-        })
-        .catch((err) => {
-          if (err?.message === 'NOTION_UNAUTHORIZED') return;
-          console.error('Notionスケジュールの取得に失敗:', err);
-          setScheduleError('読み込みに失敗しました');
-          setScheduleLoading(false);
-        });
+            const now = new Date();
+            const currentTimePercent = ((now.getTime() - scheduleWindowStart.getTime()) / scheduleWindowMs) * 100;
+            const isCurrentTimeInRange = now >= scheduleWindowStart && now <= scheduleWindowEnd;
+
+            if (isCurrentTimeInRange && currentTimePercent >= 0 && currentTimePercent <= 100) {
+              setCurrentTimePercent(currentTimePercent);
+            } else {
+              setCurrentTimePercent(null);
+            }
+
+            setScheduleLoading(false);
+          })
+          .catch((err) => {
+            if (err?.message === 'NOTION_UNAUTHORIZED') return;
+            console.error('Notionスケジュールの取得に失敗:', err);
+            setScheduleError('読み込みに失敗しました');
+            setScheduleLoading(false);
+          });
       }
 
       // Notion「進捗管理」データベースからタスクを取得
-      if (todoUnresolved) {
+      const todoDbIds = Array.isArray(todoDatabaseIds) ? todoDatabaseIds.filter(Boolean) : [];
+
+      if (todoUnresolved || todoDbIds.length === 0) {
         setTodoError('Notionで「進捗管理」という名前のデータベースを連携すると、ここに表示されます');
         setTodoLoading(false);
       } else {
-      fetch('/api/notion', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          databaseId: todoDatabaseId,
-          searchType: 'database',
-          pageSize: 50,
-        }),
-      })
-        .then((res) => {
+        const fetchDatabaseResults = async (databaseId: string) => {
+          const res = await fetch('/api/notion', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              databaseId,
+              searchType: 'database',
+              pageSize: 50,
+            }),
+          });
+
           if (res.status === 401) {
             router.push('/login');
             throw new Error('NOTION_UNAUTHORIZED');
           }
           if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-          return res.json();
-        })
-        .then((data) => {
-          const rawResults = Array.isArray(data.results) ? data.results : [];
 
-          const tasksList = rawResults
-            .map((item: any) => {
-              const statusName = item.properties?.['ステータス']?.name || '';
-              const dueDate = item.properties?.['期日']?.start || null;
-              return {
-                id: item.id,
-                name: item.properties?.['タスク名'] || item.title || '無題',
-                done: statusName === '完了',
-                status: statusName,
-                overdue: Boolean(item.properties?.['期限超過']),
-                dueDate,
-              };
-            })
-            .filter((task: any) => task.status !== '完了')
-            .sort((a: any, b: any) => {
-              if (!a.dueDate) return 1;
-              if (!b.dueDate) return -1;
-              return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
-            })
-            .slice(0, 12);
+          const data = await res.json();
+          return Array.isArray(data.results) ? data.results : [];
+        };
 
-          setTodoTasks(tasksList);
-          setTodoLoading(false);
-        })
-        .catch((err) => {
-          if (err?.message === 'NOTION_UNAUTHORIZED') return;
-          console.error('Notionタスクの取得に失敗:', err);
-          setTodoError('読み込みに失敗しました');
-          setTodoLoading(false);
-        });
+        Promise.allSettled(todoDbIds.map(fetchDatabaseResults))
+          .then((results) => {
+            const rawResults = results.flatMap((result, index) => {
+              if (result.status === 'fulfilled') return result.value;
+              if (result.reason?.message === 'NOTION_UNAUTHORIZED') return [];
+              console.error(`NotionタスクDBの取得に失敗: ${todoDbIds[index]}`, result.reason);
+              return [];
+            });
+
+            const tasksList = rawResults
+              .map((item: any) => {
+                const statusName = item.properties?.['ステータス']?.name || '';
+                const dueDate = item.properties?.['期日']?.start || null;
+                return {
+                  id: item.id,
+                  name: item.properties?.['タスク名'] || item.title || '無題',
+                  done: statusName === '完了',
+                  status: statusName,
+                  overdue: Boolean(item.properties?.['期限超過']),
+                  dueDate,
+                };
+              })
+              .filter((task: any) => task.status !== '完了')
+              .sort((a: any, b: any) => {
+                if (!a.dueDate) return 1;
+                if (!b.dueDate) return -1;
+                return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
+              })
+              .slice(0, 12);
+
+            console.log('Notionタスクの取得結果:', tasksList);
+
+            setTodoTasks(tasksList);
+            setTodoLoading(false);
+          })
+          .catch((err) => {
+            if (err?.message === 'NOTION_UNAUTHORIZED') return;
+            console.error('Notionタスクの取得に失敗:', err);
+            setTodoError('読み込みに失敗しました');
+            setTodoLoading(false);
+          });
       }
     }, 0); // 0秒ディレイで画面描画の直後に実行
 
-  }, [router, scheduleDatabaseId, todoDatabaseId, scheduleUnresolved, todoUnresolved]);
+  }, [router, scheduleDatabaseIds, todoDatabaseIds, scheduleUnresolved, todoUnresolved]);
 
   // ポップアップのボタン用：ブラウザのネイティブ許可ダイアログを表示させ、
   // 「許可」「拒否」どちらが選ばれてもホームへ進む（未決定のまま進めることだけを防ぐ）

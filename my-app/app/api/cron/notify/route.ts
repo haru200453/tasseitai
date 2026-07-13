@@ -1,12 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import webpush from "web-push";
-import { queryNotionDatabase, collectNotionPageInfo } from "../../notion/notion.js";
-import { generateText } from "../../groq/groq.js";
+import { getWorkspaceSchema, queryDatabase } from "../../notion";
+import { generateText, executeNotionSearch } from "../../groq/groq";
 import { getAllNotionUserIds, getNotionToken } from "@/lib/notionTokenStore";
 import { getPushSubscriptions, removePushSubscription } from "@/lib/pushSubscriptions";
-import { getUserDatabaseMap, type NotionTopicId } from "@/lib/notionDatabaseMap";
+import { resolveNotionApiKey } from "@/lib/notionAuth";
 
 export const runtime = "nodejs";
+
+type NotionTopicId = "shopping" | "todo" | "schedule" | "jobhunting" | "memo";
+
+const DEFAULT_DATABASE_IDS: Record<NotionTopicId, string[]> = {
+  shopping: ["38fa15fd-a3c1-8049-8041-ebf679d048b2"],
+  todo: ["38fa15fd-a3c1-80bd-98d9-ddcfe8406a93"],
+  schedule: ["38fa15fd-a3c1-80fa-a200-d99ac64b3409"],
+  jobhunting: ["38fa15fd-a3c1-8076-80ad-dc57719ac014"],
+  memo: ["38fa15fd-a3c1-80ed-b95d-ea990af2b963"],
+};
 
 // 天気のデフォルト地域（ホーム画面のデフォルトと同じ大阪。cronはサーバー側実行のためユーザーごとの設定は参照できない）
 const DEFAULT_WEATHER_LAT = "34.6937";
@@ -59,11 +69,44 @@ function getCurrentSlot(jstHour: number): Category | "wrapup" | null {
   return CYCLE_CATEGORIES[index];
 }
 
-async function getShoppingItems(apiKey: string, databaseId: string): Promise<string[]> {
-  const pages = await queryNotionDatabase(apiKey, databaseId, 50, 2);
-  return pages
-    .map((page: any) => collectNotionPageInfo(page))
-    .map((item: any) => item.properties?.["商品名"] || item.title || "無題")
+async function resolveDatabaseIds(accessToken: string): Promise<Record<NotionTopicId, string[]>> {
+  const resolved = { ...DEFAULT_DATABASE_IDS };
+
+  try {
+    const workspaceSchema = await getWorkspaceSchema(accessToken);
+    const todoDatabaseIds = workspaceSchema
+      .filter((schema) => schema.databaseTitle === "進捗管理")
+      .map((schema) => schema.databaseId)
+      .filter(Boolean);
+    const scheduleDatabaseIds = workspaceSchema
+      .filter((schema) => ["日々の予定", "アルバイト", "就職活動"].includes(schema.databaseTitle))
+      .map((schema) => schema.databaseId)
+      .filter(Boolean);
+
+    if (todoDatabaseIds.length > 0) {
+      resolved.todo = todoDatabaseIds;
+    }
+    if (scheduleDatabaseIds.length > 0) {
+      resolved.schedule = scheduleDatabaseIds;
+    }
+  } catch (error) {
+    console.warn("[cron/notify] failed to resolve database ids from workspace schema", error);
+  }
+
+  return resolved;
+}
+
+async function queryAllDatabases(apiKey: string, databaseIds: string[]): Promise<any[]> {
+  if (!databaseIds.length) return [];
+
+  const results = await Promise.all(databaseIds.map((databaseId) => queryDatabase(apiKey, databaseId)));
+  return results.flat();
+}
+
+async function getShoppingItems(apiKey: string, databaseIds: string[]): Promise<string[]> {
+  const rows = await queryAllDatabases(apiKey, databaseIds);
+  return rows
+    .map((row: any) => row["商品名"])
     .filter(Boolean);
 }
 
@@ -77,9 +120,8 @@ async function getWeatherDescription(): Promise<string> {
   return `${DEFAULT_WEATHER_NAME}の現在の気温${current.temperature_2m}℃、天気コード${current.weather_code}、風速${current.wind_speed_10m}m/s`;
 }
 
-async function getScheduleToday(apiKey: string, databaseId: string): Promise<{ name: string; time: string }[]> {
-  const pages = await queryNotionDatabase(apiKey, databaseId, 50, 2);
-  const events = pages.map((page: any) => collectNotionPageInfo(page));
+async function getScheduleToday(apiKey: string, databaseIds: string[]): Promise<{ name: string; time: string }[]> {
+  const events = await queryAllDatabases(apiKey, databaseIds);
 
   const now = new Date();
   const endOfDay = new Date(now);
@@ -87,37 +129,36 @@ async function getScheduleToday(apiKey: string, databaseId: string): Promise<{ n
 
   return events
     .filter((event: any) => {
-      const start = event.properties?.["日時"]?.start;
+      const start = event["日時"];
       if (!start) return false;
       const startDate = new Date(start);
       return startDate >= now && startDate <= endOfDay;
     })
     .map((event: any) => {
-      const start = new Date(event.properties["日時"].start);
+      const start = new Date(event["日時"]);
       const time = `${String(start.getHours()).padStart(2, "0")}:${String(start.getMinutes()).padStart(2, "0")}`;
-      return { name: event.properties?.["予定"] || event.title || "無題", time };
+      return { name: event["予定"] || event["タイトル"] || "無題", time };
     });
 }
 
 // 「完了していない」かつ「期限超過」または「2日以内に期日が来る」タスク（＝遅れそう・遅れているタスク）
-async function getAtRiskTasks(apiKey: string, databaseId: string): Promise<string[]> {
-  const pages = await queryNotionDatabase(apiKey, databaseId, 50, 2);
-  const tasks = pages.map((page: any) => collectNotionPageInfo(page));
-
+async function getAtRiskTasks(apiKey: string, databaseIds: string[]): Promise<string[]> {
+  const tasks = await queryAllDatabases(apiKey, databaseIds);
+  
   const now = new Date();
   const soonThreshold = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000);
 
   return tasks
     .filter((task: any) => {
-      const statusName = task.properties?.["ステータス"]?.name || "";
+      const statusName = task["ステータス"] || "";
       if (statusName === "完了") return false;
-      const overdue = Boolean(task.properties?.["期限超過"]);
+      const overdue = Boolean(task["期限超過"]);
       if (overdue) return true;
-      const dueDate = task.properties?.["期日"]?.start;
+      const dueDate = task["期日"];
       if (!dueDate) return false;
       return new Date(dueDate) <= soonThreshold;
     })
-    .map((task: any) => task.properties?.["タスク名"] || task.title || "無題");
+    .map((task: any) => task["タスク名"] || "無題");
 }
 
 async function getNewsHeadlines(): Promise<string[]> {
@@ -132,23 +173,22 @@ async function getNewsHeadlines(): Promise<string[]> {
 }
 
 // 就活データベースのうち、期日が7日以内に迫っているもの
-async function getUpcomingJobHunting(apiKey: string, databaseId: string): Promise<string[]> {
-  const pages = await queryNotionDatabase(apiKey, databaseId, 50, 2);
-  const entries = pages.map((page: any) => collectNotionPageInfo(page));
+async function getUpcomingJobHunting(apiKey: string, databaseIds: string[]): Promise<string[]> {
+  const entries = await queryAllDatabases(apiKey, databaseIds);
 
   const now = new Date();
   const soonThreshold = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
   return entries
     .filter((entry: any) => {
-      const dueDate = entry.properties?.["期日"]?.start;
+      const dueDate = entry["期日"];
       if (!dueDate) return false;
       const due = new Date(dueDate);
       return due >= now && due <= soonThreshold;
     })
     .map((entry: any) => {
-      const statusName = entry.properties?.["ステータス"]?.name || "";
-      const company = entry.properties?.["会社名"] || entry.title || "無題";
+      const statusName = entry["ステータス"] || "";
+      const company = entry["会社名"] || "無題";
       return `${company}（${statusName}）`;
     });
 }
@@ -160,13 +200,15 @@ const SHARED_SLOTS = new Set<Category>(["weather", "news"]);
 // データが無い場合も「何も無い」という状態自体をNoirに伝え、必ず何かしら通知を作ってもらう。
 async function buildCategoryContext(
   category: Category,
-  apiKey: string | null,
-  databaseMap: Record<NotionTopicId, string> | null
+  apiKey?: string | null,
+  databaseIds?: Record<NotionTopicId, string[]>
 ): Promise<string | null> {
+  const safeApiKey = apiKey ?? "";
+
   switch (category) {
     case "shopping": {
-      if (!apiKey || !databaseMap) return null;
-      const items = await getShoppingItems(apiKey, databaseMap.shopping);
+      if (!safeApiKey) return null;
+      const items = await getShoppingItems(safeApiKey, databaseIds?.shopping ?? DEFAULT_DATABASE_IDS.shopping);
       return items.length > 0
         ? `買い物リストの中身: ${items.slice(0, 8).join("、")}`
         : "買い物リストは今のところ空っぽ";
@@ -175,18 +217,10 @@ async function buildCategoryContext(
       return (await getWeatherDescription()) || "天気情報が取得できなかった";
     }
     case "schedule": {
-      if (!apiKey || !databaseMap) return null;
-      const events = await getScheduleToday(apiKey, databaseMap.schedule);
-      return events.length > 0
-        ? `本日残りの予定: ${events.map((e) => `${e.time} ${e.name}`).join("、")}`
-        : "本日はこの後、特に予定は入っていない";
+      return await executeNotionSearch(safeApiKey, "本日の予定");
     }
     case "todo": {
-      if (!apiKey || !databaseMap) return null;
-      const tasks = await getAtRiskTasks(apiKey, databaseMap.todo);
-      return tasks.length > 0
-        ? `遅れているか、2日以内に期日が来るタスク: ${tasks.slice(0, 8).join("、")}`
-        : "遅れている・期日が近いタスクは特に無い、順調な状態";
+      return await executeNotionSearch(safeApiKey, "期限が2日以内のタスク");
     }
     case "news": {
       const headlines = await getNewsHeadlines();
@@ -195,11 +229,7 @@ async function buildCategoryContext(
         : "ニュースが取得できなかった";
     }
     case "jobhunting": {
-      if (!apiKey || !databaseMap) return null;
-      const entries = await getUpcomingJobHunting(apiKey, databaseMap.jobhunting);
-      return entries.length > 0
-        ? `1週間以内に動きがある就活案件: ${entries.join("、")}`
-        : "1週間以内に動きがある就活案件は今のところ無い";
+      return await executeNotionSearch(safeApiKey, "就活案件");
     }
     default:
       return null;
@@ -218,8 +248,12 @@ async function composeNotificationBody(context: string): Promise<string> {
   return generateText(prompt);
 }
 
-async function composeWrapUpBody(apiKey: string, todoDatabaseId: string): Promise<string> {
-  const tasks = await getAtRiskTasks(apiKey, todoDatabaseId);
+async function composeWrapUpBody(apiKey?: string | null, databaseIds?: Record<NotionTopicId, string[]>): Promise<string> {
+  if (!apiKey) {
+    return "Notion accessToken が設定されていません。";
+  }
+
+  const tasks = await getAtRiskTasks(apiKey, databaseIds?.todo ?? DEFAULT_DATABASE_IDS.todo);
   const context =
     tasks.length > 0
       ? `今日時点で遅れている・期日が近いタスクが${tasks.length}件残っている: ${tasks.slice(0, 5).join("、")}`
@@ -263,7 +297,6 @@ export async function GET(request: NextRequest) {
   if (!slot) {
     return NextResponse.json({ sent: false, reason: "outside notification hours", jstHour });
   }
-
   const userIds = await getAllNotionUserIds();
 
   async function sendToUser(userId: string, title: string, body: string): Promise<number> {
@@ -289,7 +322,7 @@ export async function GET(request: NextRequest) {
   // weather/newsはNotionを使わないので、全員に同じ内容を送る
   if (slot !== "wrapup" && SHARED_SLOTS.has(slot)) {
     const notificationTitle = CATEGORY_LABELS[slot];
-    const context = await buildCategoryContext(slot, null, null);
+    const context = await buildCategoryContext(slot, null, undefined);
     const notificationBody = context ? await composeNotificationBody(context) : null;
 
     if (!notificationBody) {
@@ -316,14 +349,13 @@ export async function GET(request: NextRequest) {
     const apiKey = await getNotionToken(userId);
     if (!apiKey) continue;
 
-    const { databases: databaseMap } = await getUserDatabaseMap(userId, apiKey);
-
     try {
+      const databaseIds = await resolveDatabaseIds(apiKey);
       const notificationBody =
         slot === "wrapup"
-          ? await composeWrapUpBody(apiKey, databaseMap.todo)
+          ? await composeWrapUpBody(apiKey, databaseIds)
           : await (async () => {
-              const context = await buildCategoryContext(slot, apiKey, databaseMap);
+              const context = await buildCategoryContext(slot, apiKey, databaseIds);
               return context ? await composeNotificationBody(context) : null;
             })();
 

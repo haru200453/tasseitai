@@ -1,34 +1,8 @@
-import { NextRequest, NextResponse } from "next/server";
-import {
-  collectNotionPageInfo,
-  queryNotionDatabase,
-  searchNotionPages,
-  filterNotionPagesByQuery,
-  getDatabaseSchema,
-} from "./notion";
+import { NextResponse } from "next/server";
+import { getServerSession } from "next-auth/next";
+import { collectNotionPageInfo, queryDatabase, searchNotionPages } from "../notion";
+import { authOptions } from "../auth/[...nextauth]/route";
 import { resolveNotionApiKey } from "@/lib/notionAuth";
-
-// データベースのプロパティ型を確認するための診断用エンドポイント
-// 例: GET /api/notion?databaseId=xxxxxxxx
-export async function GET(request: NextRequest) {
-  const databaseId = request.nextUrl.searchParams.get("databaseId");
-  const apiKey = await resolveNotionApiKey();
-
-  if (!apiKey) {
-    return NextResponse.json({ error: "Notionと連携されていません" }, { status: 401 });
-  }
-  if (!databaseId) {
-    return NextResponse.json({ error: "databaseId が必要です" }, { status: 400 });
-  }
-
-  try {
-    const schema = await getDatabaseSchema(apiKey, databaseId);
-    return NextResponse.json({ properties: schema.properties });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "不明なエラーです";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
-}
 
 const defaultPageSize = 50;
 const defaultMaxPages = 3;
@@ -40,43 +14,64 @@ function normalizeNumber(value: unknown, fallback: number) {
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as any;
-    const apiKey = await resolveNotionApiKey();
-    const databaseId = typeof body.databaseId === "string" ? body.databaseId.trim() : "";
+    // NextAuthのセッションからaccessTokenを取得
+    const session = await getServerSession(authOptions);
+    
+    if (!session) {
+      return NextResponse.json({ error: "ログインが必要です" }, { status: 401 });
+    }
+
+    const accessToken = (session as any)?.accessToken;
+    if (!accessToken) {
+      return NextResponse.json(
+        { error: "Notion access tokenが取得できません。Notionで再度ログインしてください。" },
+        { status: 401 }
+      );
+    }
+
+    const body = (await request.json()) as Record<string, unknown>;
     const query = typeof body.query === "string" ? body.query.trim() : "";
-    const searchType = body.searchType === "search" ? "search" : "database";
-    const filterType = body.filterType === "page" || body.filterType === "database" ? body.filterType : undefined;
     const pageSize = normalizeNumber(body.pageSize, defaultPageSize);
     const maxPages = normalizeNumber(body.maxPages, defaultMaxPages);
-    const filter = body.filter && typeof body.filter === "object" ? (body.filter as any) : undefined;
-    const sorts = Array.isArray(body.sorts) ? (body.sorts as any) : undefined;
+    const databaseId = typeof body.databaseId === "string" ? body.databaseId.trim() : "";
+    const searchType = typeof body.searchType === "string" ? body.searchType : "workspace";
 
-    if (!apiKey) {
-      return NextResponse.json({ error: "Notionと連携されていません" }, { status: 401 });
+    if (searchType === "database" && databaseId) {
+      const rows = await queryDatabase(accessToken, databaseId, false);
+      const results = rows.map((row: any) => {
+        const properties: Record<string, any> = {};
+
+        for (const [key, value] of Object.entries(row || {})) {
+          if (!key || key.startsWith("__")) continue;
+
+          if (key === "ステータス" || key === "状態") {
+            properties[key] = { name: value ?? "" };
+          } else if (key === "期日" || key === "日時") {
+            properties[key] = { start: value ?? null };
+          } else {
+            properties[key] = value;
+          }
+        }
+
+        return {
+          id: row.__page_id,
+          title: row["タイトル"] || row["予定"] || row["タスク名"] || "",
+          properties,
+        };
+      });
+
+      return NextResponse.json({
+        source: "database",
+        count: results.length,
+        results,
+      });
     }
 
-    if (searchType === "database" && !databaseId) {
-      return NextResponse.json({ error: "databaseId が必要です" }, { status: 400 });
-    }
-
-    let pages: any[] = [];
-    let source = "database";
-
-    if (searchType === "search") {
-      pages = await searchNotionPages(apiKey, query, pageSize, maxPages, filterType);
-      source = "search";
-    } else {
-      pages = await queryNotionDatabase(apiKey, databaseId, pageSize, maxPages, filter, sorts);
-      if (query) {
-        pages = filterNotionPagesByQuery(pages, query);
-      }
-      source = "database";
-    }
-
+    const pages = await searchNotionPages(accessToken, query, pageSize, maxPages);
     const results = pages.map((page) => collectNotionPageInfo(page));
 
     return NextResponse.json({
-      source,
+      source: "workspace",
       count: results.length,
       results,
     });

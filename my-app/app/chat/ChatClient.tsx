@@ -72,7 +72,7 @@ export default function ChatClient() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ message: question }),
+        body: JSON.stringify({ question }),
       });
 
       if (response.status === 401) {
@@ -131,7 +131,10 @@ export default function ChatClient() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ topicId, originalMessage: pendingOriginalMessage }),
+        body: JSON.stringify({
+          question: pendingOriginalMessage,
+          topicId,
+        }),
       });
 
       if (response.status === 401) {
@@ -170,7 +173,10 @@ export default function ChatClient() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ confirmRegistration: pendingItem }),
+        body: JSON.stringify({
+          question: pendingOriginalMessage || "登録を確定します",
+          confirmRegistration: pendingItem,
+        }),
       });
 
       if (response.status === 401) {
