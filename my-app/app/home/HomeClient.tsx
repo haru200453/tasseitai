@@ -609,8 +609,9 @@ export default function HomeClient({
                 Schedule
               </a>
               <p className={styles.scheduleDate}>{scheduleDateLabel}</p>
-
               <div className={styles.timelineContainer}>
+                <div className={styles.timelineScroll}>
+                <div className={styles.timelineContent}>
                 <div className={styles.timelineHeader}>
                   {scheduleTimeMarkers.map((label, index) => (
                     <span key={index}>{label}</span>
@@ -652,6 +653,8 @@ export default function HomeClient({
                     />
                   )}
                 </div>
+              </div>
+              </div>
               </div>
             </div>
 

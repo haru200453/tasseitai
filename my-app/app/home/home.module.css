@@ -181,14 +181,18 @@
   border-top: 1px solid rgba(255, 255, 255, 0.4);
   padding-top: 8px;
 }
+.timelineScroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  width: 100%;
+}
+
+.timelineContent {
+  min-width: 900px; /* 好きな幅に調整 */
+}
 .timelineHeader {
   display: flex;
   justify-content: space-between;
-  font-size: 0.8rem;
-  opacity: 0.9;
-  margin-bottom: 8px;
-  font-weight: 500;
-  color: #e5c158;
 }
 .timelineBarWrapper {
   background: rgba(255, 255, 255, 0.08);
