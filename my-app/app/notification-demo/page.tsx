@@ -31,8 +31,8 @@ const publicVapidKey = process.env.NEXT_PUBLIC_WEB_PUSH_PUBLIC_KEY;
 const NOTIFICATION_CONFIG = {
   title: 'Journee push test',
   body: 'Service Worker経由のテスト通知です。',
-  icon: '/icon-192x192.png',
-  badge: '/icon-192x192.png',
+  icon: '/icon-512x512.png',
+  badge: '/icon-512x512.png',
   tag: 'journee-push-test',
 } as const;
 

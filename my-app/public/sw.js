@@ -35,8 +35,8 @@ self.addEventListener('push', (event) => {
 
   const options = {
     body,
-    icon: '/icon-192x192.png',
-    badge: '/icon-192x192.png',
+    icon: '/icon-512x512.png',
+    badge: '/icon-512x512.png',
     tag: NOTIFICATION_TAG,
     requireInteraction: false,
     vibrate: [200, 100, 200],
