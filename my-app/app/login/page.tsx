@@ -37,7 +37,13 @@ function LoginContent() {
     <main className={styles.container}>
       <div className={styles.card}>
         <div className={styles.logoWrapper}>
-          <div className={styles.logo}>AI</div>
+        <img 
+            src="/icon-512x512.png" 
+            alt="AI秘書ロゴ" 
+            width={80} 
+            height={80} 
+            style={{ borderRadius: '16px', marginBottom: '16px' }} 
+          />
           <h1 className={styles.title}>AI秘書</h1>
         </div>
 
