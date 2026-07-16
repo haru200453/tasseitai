@@ -34,8 +34,8 @@ export default function Nav() {
               <img 
                 src={item.iconSrc} 
                 alt={item.label} 
-                width={50} 
-                height={50}
+                width={40} 
+                height={40}
                 style={{ filter: isActive ? 'none' : 'grayscale(100%) opacity(0.6)' }}
               />
             ) : (
