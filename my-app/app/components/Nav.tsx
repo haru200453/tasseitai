@@ -3,14 +3,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import styles from "./Nav.module.css";
-import { HomeIcon, ChatIcon, SettingsIcon } from "./icons";
+import { SettingsIcon } from "./icons"; // SettingsIconのみインポート
 
-// ログイン関連の画面ではアプリ本体のナビは不要なので出さない
 const HIDDEN_PATHS = ["/login", "/notion-login-popup", "/notion-logout"];
 
 const NAV_ITEMS = [
-  { href: "/", label: "ホーム", Icon: HomeIcon },
-  { href: "/chat", label: "トーク", Icon: ChatIcon },
+  { href: "/", label: "ホーム", iconSrc: "/icon-home.png" },
+  { href: "/chat", label: "トーク", iconSrc: "/icon-chat.png" },
   { href: "/settings", label: "設定", Icon: SettingsIcon },
 ];
 
@@ -21,16 +20,28 @@ export default function Nav() {
 
   return (
     <nav className={styles.nav}>
-      {NAV_ITEMS.map(({ href, label, Icon }) => {
-        const isActive = href === "/" ? pathname === "/" || pathname === "/home" : pathname.startsWith(href);
+      {NAV_ITEMS.map((item) => {
+        const isActive = item.href === "/" ? pathname === "/" || pathname === "/home" : pathname.startsWith(item.href);
+        
         return (
           <Link
-            key={href}
-            href={href}
+            key={item.href}
+            href={item.href}
             className={`${styles.navItem} ${isActive ? styles.navItemActive : ""}`}
           >
-            <Icon size={22} color={isActive ? "#e5c158" : "#8b8d99"} />
-            <span>{label}</span>
+            {/* 画像(iconSrc)がある場合はimg、ない場合はコンポーネント(Icon)を表示 */}
+            {item.iconSrc ? (
+              <img 
+                src={item.iconSrc} 
+                alt={item.label} 
+                width={50} 
+                height={50}
+                style={{ filter: isActive ? 'none' : 'grayscale(100%) opacity(0.6)' }}
+              />
+            ) : (
+              item.Icon && <item.Icon size={22} color={isActive ? "#e5c158" : "#8b8d99"} />
+            )}
+            <span>{item.label}</span>
           </Link>
         );
       })}
